@@ -1,0 +1,7 @@
+LICENSE
+README.md
+setup.py
+asyncFontCompiler.roboFontExt/lib/asyncFontCompiler.egg-info/PKG-INFO
+asyncFontCompiler.roboFontExt/lib/asyncFontCompiler.egg-info/SOURCES.txt
+asyncFontCompiler.roboFontExt/lib/asyncFontCompiler.egg-info/dependency_links.txt
+asyncFontCompiler.roboFontExt/lib/asyncFontCompiler.egg-info/top_level.txt

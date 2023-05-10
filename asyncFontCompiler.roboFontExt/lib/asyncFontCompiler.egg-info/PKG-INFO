@@ -1,0 +1,11 @@
+Metadata-Version: 2.1
+Name: asyncFontCompiler
+Version: 0.0.1
+Summary: A python package to compile fonts asnychoronously inside RF.
+Home-page: http://bahman.design
+Author: Bahman Eslami
+Author-email: contact@bahman.design
+License: Apache 2.0
+Platform: Any
+Requires-Python: >=3.7
+License-File: LICENSE
