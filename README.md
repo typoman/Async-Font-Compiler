@@ -20,4 +20,3 @@ async def getFontData():
 asyncio.create_task(getFontData())
 ```
 
-`
