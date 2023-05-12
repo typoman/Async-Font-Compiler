@@ -1,5 +1,11 @@
 # Async Font Compiler
-An asynchronous font compiler based on font goggles for RoboFont. 
+An asynchronous font compiler based on FontGoggles for RoboFont.
+
+Read more about FontGoggles here on the website
+[
+FontGoggles — Interactive Previewing and Comparing
+](https://fontgoggles.org).
+
 
 # How?
 You can use the following example to comiple a font to a byte string without
