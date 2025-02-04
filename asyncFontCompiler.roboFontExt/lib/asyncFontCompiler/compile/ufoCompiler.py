@@ -1,3 +1,6 @@
+""" Tools to compile a UFO's features as quickly as possible."""
+
+import logging
 import pickle
 import re
 import sys
@@ -32,9 +35,7 @@ def compileUFOToFont(ufoPath):
     if ".notdef" not in glyphOrder:
         # We need a .notdef glyph, so let's make one.
         glyphOrder.insert(0, ".notdef")
-    cmap, revCmap, anchors = fetchCharacterMappingAndAnchors(
-        glyphSet, ufoPath, ufo2=ufo2
-    )
+    widths, cmap, revCmap, anchors = fetchGlyphInfo(glyphSet, ufoPath, ufo2=ufo2)
     fb = FontBuilder(round(info.unitsPerEm))
     fb.setupGlyphOrder(glyphOrder)
     fb.setupCharacterMap(cmap)
@@ -45,7 +46,7 @@ def compileUFOToFont(ufoPath):
     # changes.
     ttFont["FGAx"] = newTable("FGAx")
     ttFont["FGAx"].data = pickle.dumps(anchors)
-    ufo = MinimalFontObject(ufoPath, reader, revCmap, anchors)
+    ufo = MinimalFontObject(ufoPath, reader, widths, revCmap, anchors)
     feaComp = FeatureCompiler(ufo, ttFont)
     try:
         feaComp.compile()
@@ -67,15 +68,17 @@ def compileUFOToPath(ufoPath, ttPath):
     ttFont.save(ttPath, reorderTables=False)
 
 
-_unicodeOrAnchorGLIFPattern = re.compile(rb"(<\s*(anchor|unicode)\s+([^>]+)>)")
+_tagGLIFPattern = re.compile(rb"(<\s*(advance|anchor|unicode)\s+([^>]+)>)")
 _ufo2AnchorPattern = re.compile(
     rb"<contour>\s+(<point\s+[^>]+move[^>]+name[^>]+>)\s+</contour>"
 )
 _unicodeAttributeGLIFPattern = re.compile(rb"hex\s*=\s*\"([0-9A-Fa-f]+)\"")
+_widthAttributeGLIFPattern = re.compile(rb"width\s*=\s*\"([0-9A-Fa-f]+)\"")
 
 
-def fetchCharacterMappingAndAnchors(glyphSet, ufoPath, glyphNames=None, ufo2=False):
+def fetchGlyphInfo(glyphSet, ufoPath, glyphNames=None, ufo2=False):
     # This seems about 2.3 times faster than reader.getCharacterMapping()
+    widths = {}
     cmap = {}  # unicode: glyphName
     revCmap = {}
     anchors = {}  # glyphName: [(anchorName, x, y), ...]
@@ -87,14 +90,13 @@ def fetchCharacterMappingAndAnchors(glyphSet, ufoPath, glyphNames=None, ufo2=Fal
         if b"<!--" in data:
             # Fall back to proper parser, assuming this to be uncommon
             # (This does not work for UFO 2)
-            unicodes, glyphAnchors = fetchUnicodesAndAnchors(data)
+            width, unicodes, glyphAnchors = fetchUnicodesAndAnchors(data)
         else:
             # Fast route with regex
+            width = None
             unicodes = []
             glyphAnchors = []
-            for rawElement, tag, rawAttributes in _unicodeOrAnchorGLIFPattern.findall(
-                data
-            ):
+            for rawElement, tag, rawAttributes in _tagGLIFPattern.findall(data):
                 if tag == b"unicode":
                     m = _unicodeAttributeGLIFPattern.match(rawAttributes)
                     try:
@@ -104,10 +106,16 @@ def fetchCharacterMappingAndAnchors(glyphSet, ufoPath, glyphNames=None, ufo2=Fal
                 elif tag == b"anchor":
                     root = ET.fromstring(rawElement)
                     glyphAnchors.append(_parseAnchorAttrs(root.attrib))
+                elif tag == b"advance":
+                    m = _widthAttributeGLIFPattern.search(rawAttributes)
+                    if m is not None:
+                        width = float(m.group(1))
             if ufo2:
                 for rawElement in _ufo2AnchorPattern.findall(data):
                     root = ET.fromstring(rawElement)
                     glyphAnchors.append(_parseAnchorAttrs(root.attrib))
+
+        widths[glyphName] = width
 
         uniqueUnicodes = []
         for codePoint in unicodes:
@@ -129,7 +137,13 @@ def fetchCharacterMappingAndAnchors(glyphSet, ufoPath, glyphNames=None, ufo2=Fal
             f"U+{codePoint:04X}:{','.join(glyphNames)}"
             for codePoint, glyphNames in sorted(duplicateUnicodes.items())
         )
-    return cmap, revCmap, anchors
+        logger = logging.getLogger("fontgoggles.font.ufoFont")
+        logger.warning(
+            "Some code points in '%s' are assigned to multiple glyphs: %s",
+            ufoPath,
+            dupMessage,
+        )
+    return widths, cmap, revCmap, anchors
 
 
 def fetchUnicodesAndAnchors(glif):
@@ -138,7 +152,7 @@ def fetchUnicodesAndAnchors(glif):
     """
     parser = FetchUnicodesAndAnchorsParser()
     parser.parse(glif)
-    return parser.unicodes, parser.anchors
+    return parser.advanceWidth, parser.unicodes, parser.anchors
 
 
 def _parseNumber(s):
@@ -152,13 +166,20 @@ def _parseNumber(s):
 
 
 def _parseAnchorAttrs(attrs):
-    return attrs.get("name"), _parseNumber(attrs.get("x")), _parseNumber(attrs.get("y"))
+    return (
+        attrs.get("name"),
+        _parseNumber(attrs.get("x")),
+        _parseNumber(attrs.get("y")),
+        attrs.get("identifier"),
+    )
 
 
 class FetchUnicodesAndAnchorsParser(BaseGlifParser):
+
     def __init__(self):
         self.unicodes = []
         self.anchors = []
+        self.advanceWidth = None
         super().__init__()
 
     def startElementHandler(self, name, attrs):
@@ -174,18 +195,22 @@ class FetchUnicodesAndAnchorsParser(BaseGlifParser):
                         pass
             elif name == "anchor":
                 self.anchors.append(_parseAnchorAttrs(attrs))
+            elif name == "advance":
+                self.advanceWidth = _parseNumber(attrs.get("width"))
         super().startElementHandler(name, attrs)
 
 
 class MinimalFontObject:
+
     # This class and its relatives implement a defcon-like font object, but
     # only support the bare minimum for ufo2ft's FeatureCompiler to do its
     # work. No outlines are needed, no advances, no glyph.lib, only glyph
     # unicodes and anchors, and at the font level, only features, groups,
     # kerning and lib are needed.
 
-    def __init__(self, ufoPath, reader, revCmap, anchors):
+    def __init__(self, ufoPath, reader, widths, revCmap, anchors):
         self.path = ufoPath
+        self._widths = widths
         self._revCmap = revCmap
         self._anchors = anchors
         self._glyphNames = set(reader.getGlyphSet().contents.keys())
@@ -201,6 +226,11 @@ class MinimalFontObject:
     def keys(self):
         return self._glyphNames
 
+    def __iter__(self):
+        for glyphName in self._glyphNames:
+            glyph = self[glyphName]
+            yield glyph
+
     def __getitem__(self, glyphName):
         if glyphName not in self._glyphNames:
             raise KeyError(glyphName)
@@ -209,18 +239,24 @@ class MinimalFontObject:
         if glyph is None:
             glyph = MinimalGlyphObject(
                 glyphName,
+                self._widths.get(glyphName, 0),
                 self._revCmap.get(glyphName),
                 self._anchors.get(glyphName, ()),
             )
-            self._glyphs[glyphName] = glyphName
+            self._glyphs[glyphName] = glyph
         return glyph
 
 
 class MinimalGlyphObject:
-    def __init__(self, name, unicodes, anchors):
+
+    def __init__(self, name, width, unicodes, anchors):
         self.name = name
+        self.width = width
         self.unicodes = unicodes
-        self.anchors = [MinimalAnchorObject(name, x, y) for name, x, y in anchors]
+        self.anchors = [
+            MinimalAnchorObject(name, x, y, identifier)
+            for name, x, y, identifier in anchors
+        ]
 
     @property
     def unicode(self):
@@ -228,12 +264,15 @@ class MinimalGlyphObject:
 
 
 class MinimalAnchorObject:
-    def __init__(self, name, x, y):
+
+    def __init__(self, name, x, y, identifier):
         self.name = name
         self.x = x
         self.y = y
+        self.identifier = identifier
 
 
 class MinimalFeaturesObject:
+
     def __init__(self, featureText):
         self.text = featureText
